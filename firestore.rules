@@ -1,0 +1,11 @@
+rules_version = '2';
+// Només l'app (amb sessió anònima de Firebase) pot llegir i escriure.
+// No hi ha contrasenyes: el control és de confiança entre el claustre.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{col}/{docId} {
+      allow read, write: if request.auth != null
+        && col in ['people', 'bookings', 'requests', 'holidays', 'incidents'];
+    }
+  }
+}
