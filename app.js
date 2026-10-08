@@ -47,6 +47,9 @@ const S = {
 };
 let store;
 const shownRequests = new Set();
+// Esborrany del formulari d'incidències (es conserva encara que la pantalla es redibuixe)
+const incDraft = { tablet: null, text: '', photo: null, busy: false };
+const MAX_PHOTO_CHARS = 700000; // Firestore admet documents d'1 MB com a màxim
 
 // ================= Utilitats =================
 function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
@@ -366,6 +369,7 @@ function renderIncidents() {
   const item = (i) => `<div class="item" style="--c:${OWNER[i.tablet]?.color || '#999'}">
       <div><b>Tablet ${i.tablet}</b> <span class="meta">(${OWNER[i.tablet]?.name || '?'})</span>
         <div>${esc(i.text)}</div>
+        ${i.photoId ? `<button class="btn small" style="margin:4px 0" data-act="viewPhoto" data-id="${i.id}">📷 Veure foto</button>` : ''}
         <div class="meta">${esc(i.personName)} · ${new Date(i.createdAt).toLocaleString('ca-ES', { dateStyle: 'short', timeStyle: 'short' })}${i.resolvedAt ? ` · resolta el ${new Date(i.resolvedAt).toLocaleDateString('ca-ES')}` : ''}</div></div>
       <div class="actions">${admin ? (i.status !== 'resolta'
         ? `<button class="btn small ok" data-act="resolveInc" data-id="${i.id}">Marcar resolta</button>`
@@ -374,10 +378,17 @@ function renderIncidents() {
   return `
     <div class="card"><h2>Comunicar una incidència</h2>
       <form data-form="incident">
-        <div class="form-row"><label>Tablet<select name="tablet" required>${tabletOptions()}</select></label></div>
+        <div class="form-row"><label>Tablet<select name="tablet" required data-draft="tablet">${tabletOptions(incDraft.tablet)}</select></label></div>
         <label style="display:block;margin-top:10px;font-weight:700;color:var(--muted);font-size:.85rem">Què passa?
-          <textarea name="text" required placeholder="Ex.: la pantalla està trencada, no carrega, falta el carregador..."></textarea></label>
-        <div style="margin-top:10px"><button class="btn primary" type="submit">Enviar incidència</button></div>
+          <textarea name="text" required data-draft="text" placeholder="Ex.: la pantalla està trencada, no carrega, falta el carregador...">${esc(incDraft.text)}</textarea></label>
+        <div class="photo-field">
+          <b>Foto de la part de darrere</b>
+          <p class="hint">Fes una foto a l'etiqueta de darrere de la tablet, on apareix el número de sèrie (S/N), per a poder donar part al SAI.</p>
+          <label class="btn">📷 ${incDraft.photo ? 'Canviar la foto' : 'Fer o triar foto'}<input type="file" accept="image/*" data-change="incPhoto" hidden></label>
+          ${incDraft.photo ? `<button type="button" class="btn small danger" data-act="removeIncPhoto">Llevar</button>
+            <div class="photo-preview"><img src="${incDraft.photo}" alt="Foto adjunta"></div>` : ''}
+        </div>
+        <div style="margin-top:12px"><button class="btn primary" type="submit" ${incDraft.busy ? 'disabled' : ''}>${incDraft.busy ? 'Enviant…' : 'Enviar incidència'}</button></div>
       </form></div>
     <div class="card"><h2>Incidències obertes (${open.length})</h2><div class="list">${open.length ? open.map(item).join('') : '<p class="empty">Cap incidència oberta.</p>'}</div></div>
     ${done.length ? `<div class="card"><h2>Resoltes recentment</h2><div class="list">${done.map(item).join('')}</div></div>` : ''}`;
@@ -445,6 +456,7 @@ function renderModal() {
   if (M.type === 'who') return whoModal(M);
   if (M.type === 'cell') return cellModal(M);
   if (M.type === 'notif') return notifModal();
+  if (M.type === 'photo') return photoModal(M);
   return '';
 }
 
@@ -534,6 +546,47 @@ function notifModal() {
   return modalShell('Avisos', '', pendHTML + rejHTML, `<button class="btn" data-act="close">${pend.length ? 'Decidir més tard' : 'Tancar'}</button>`);
 }
 
+function photoModal(M) {
+  const i = S.incidents.find((x) => x.id === M.incidentId);
+  const title = i ? `Tablet ${i.tablet} · foto` : 'Foto';
+  let body = '<p class="loading">Carregant la foto…</p>';
+  if (M.error) body = `<p class="error">${esc(M.error)}</p>`;
+  else if (M.data) body = `<img class="photo-full" src="${M.data}" alt="${esc(title)}">`;
+  const footer = M.data
+    ? `<a class="btn" href="${M.data}" download="tablet-${i?.tablet ?? ''}-incidencia.jpg">Descarregar</a><button class="btn primary" data-act="close">Tancar</button>`
+    : '<button class="btn" data-act="close">Tancar</button>';
+  return modalShell(title, i ? esc(i.text) : '', body, footer);
+}
+
+// Redueix la foto (màx. 1600 px, JPEG) perquè càpiga en un document de Firestore
+async function compressImage(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = () => reject(new Error("No s'ha pogut llegir la imatge."));
+      im.src = url;
+    });
+    let max = 1600;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * scale);
+      c.height = Math.round(img.naturalHeight * scale);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      for (const q of [0.85, 0.72, 0.6]) {
+        const data = c.toDataURL('image/jpeg', q);
+        if (data.length < MAX_PHOTO_CHARS) return data;
+      }
+      max = Math.round(max * 0.8);
+    }
+    throw new Error('La foto és massa gran.');
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 // ================= Esdeveniments =================
 const byId = (col, id) => S[col].find((x) => x.id === id);
 
@@ -584,7 +637,26 @@ const actions = {
   seenRejected: async (el) => { await store.update('requests', el.dataset.id, { requesterSeen: true }); },
   resolveInc: async (el) => { await store.update('incidents', el.dataset.id, { status: 'resolta', resolvedAt: Date.now() }); },
   reopenInc: async (el) => { await store.update('incidents', el.dataset.id, { status: 'oberta', resolvedAt: null }); },
-  deleteInc: async (el) => { if (confirm('Esborrar aquesta incidència?')) await store.remove('incidents', el.dataset.id); },
+  deleteInc: async (el) => {
+    const i = byId('incidents', el.dataset.id);
+    if (!i || !confirm('Esborrar aquesta incidència?')) return;
+    await store.remove('incidents', i.id);
+    if (i.photoId) await store.remove('photos', i.photoId).catch(() => {});
+  },
+  viewPhoto: async (el) => {
+    const i = byId('incidents', el.dataset.id);
+    if (!i?.photoId) return;
+    const M = { type: 'photo', incidentId: i.id, data: null, error: null };
+    S.modal = M;
+    render();
+    try {
+      const p = await store.get('photos', i.photoId);
+      if (p?.data) M.data = p.data; else M.error = "No s'ha trobat la foto.";
+    } catch (err) {
+      M.error = "No s'ha pogut carregar la foto.";
+    }
+  },
+  removeIncPhoto: () => { incDraft.photo = null; },
   delPerson: async (el) => {
     const p = byId('people', el.dataset.id);
     if (p && confirm(`Esborrar ${p.name}? Les seues reserves es mantindran.`)) await store.remove('people', p.id);
@@ -612,12 +684,23 @@ document.addEventListener('click', async (e) => {
 
 document.addEventListener('input', (e) => {
   if (e.target.dataset.input === 'note' && S.modal) S.modal.note = e.target.value;
+  if (e.target.dataset.draft === 'text') incDraft.text = e.target.value;
 });
 
 document.addEventListener('change', async (e) => {
   const el = e.target;
+  if (el.dataset.draft === 'tablet') { incDraft.tablet = Number(el.value); return; }
   const k = el.dataset.change;
   if (!k) return;
+  if (k === 'incPhoto') {
+    const f = el.files?.[0];
+    el.value = '';
+    if (!f) return;
+    try { incDraft.photo = await compressImage(f); } catch (err) { alert(err.message); }
+    el.blur();
+    render();
+    return;
+  }
   const id = el.dataset.id;
   if (k === 'kind') { S.modal.recurring = el.value === 'recurring'; el.blur(); render(); return; }
   if (k === 'pName' && el.value.trim()) await store.update('people', id, { name: el.value.trim() });
@@ -634,12 +717,28 @@ document.addEventListener('keydown', (e) => {
 
 const forms = {
   incident: async (fd) => {
+    if (incDraft.busy) return false;
     const m = me();
-    await store.add('incidents', {
-      tablet: Number(fd.get('tablet')), text: String(fd.get('text')).trim(),
-      personId: m.id, personName: m.name, status: 'oberta', createdAt: Date.now(),
-    });
-    alert("Incidència enviada. Gràcies!");
+    const tablet = Number(fd.get('tablet'));
+    const text = String(fd.get('text')).trim();
+    incDraft.busy = true;
+    render();
+    try {
+      let photoId = null;
+      if (incDraft.photo) photoId = await store.add('photos', { data: incDraft.photo, tablet, createdAt: Date.now() });
+      await store.add('incidents', {
+        tablet, text, photoId,
+        personId: m.id, personName: m.name, status: 'oberta', createdAt: Date.now(),
+      });
+    } catch (err) {
+      console.error(err);
+      alert("No s'ha pogut enviar la incidència. Torna-ho a provar.");
+      return false;
+    } finally {
+      incDraft.busy = false;
+    }
+    Object.assign(incDraft, { tablet: null, text: '', photo: null });
+    alert('Incidència enviada. Gràcies!');
   },
   person: async (fd) => {
     await store.add('people', {
@@ -659,7 +758,8 @@ document.addEventListener('submit', async (e) => {
   const f = e.target.dataset.form;
   if (!forms[f]) return;
   e.preventDefault();
-  await forms[f](new FormData(e.target));
+  const ok = await forms[f](new FormData(e.target));
+  if (ok === false) { render(); return; }
   e.target.reset();
   document.activeElement?.blur();
   render();

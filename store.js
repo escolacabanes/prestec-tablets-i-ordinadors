@@ -2,10 +2,14 @@
 import { firebaseConfig } from './firebase-config.js';
 
 export const COLLECTIONS = ['people', 'bookings', 'requests', 'holidays', 'incidents'];
+// Col·leccions que no se subscriuen en temps real (es llegeixen sota demanda amb get)
+const EXTRA_COLLECTIONS = ['photos'];
 const FIREBASE_VERSION = '10.12.2';
 
 export async function createStore(seed) {
-  if (firebaseConfig && firebaseConfig.apiKey) return firebaseStore(firebaseConfig, seed);
+  // ?demo a l'adreça força el mode demo (per a provar canvis sense tocar les dades reals)
+  const forceDemo = new URLSearchParams(location.search).has('demo');
+  if (!forceDemo && firebaseConfig && firebaseConfig.apiKey) return firebaseStore(firebaseConfig, seed);
   return localStore(seed);
 }
 
@@ -26,14 +30,14 @@ function localStore(seed) {
   const emit = (col) => (listeners[col] || []).forEach((cb) => cb(list(col)));
   const init = () => {
     db = {};
-    COLLECTIONS.forEach((c) => (db[c] = {}));
+    [...COLLECTIONS, ...EXTRA_COLLECTIONS].forEach((c) => (db[c] = {}));
     seed.people.forEach((p) => (db.people[uid()] = p));
     persist();
   };
 
   load();
   if (!db) init();
-  COLLECTIONS.forEach((c) => (db[c] ||= {}));
+  [...COLLECTIONS, ...EXTRA_COLLECTIONS].forEach((c) => (db[c] ||= {}));
 
   // Sincronitza entre pestanyes del mateix navegador
   window.addEventListener('storage', (e) => {
@@ -48,6 +52,10 @@ function localStore(seed) {
     subscribe(col, cb) {
       (listeners[col] ||= []).push(cb);
       cb(list(col));
+    },
+    async get(col, id) {
+      const d = db[col][id];
+      return d ? { id, ...d } : null;
     },
     async add(col, data) {
       const id = uid();
@@ -100,6 +108,10 @@ async function firebaseStore(cfg, seed) {
         (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
         (err) => console.error(`Error llegint ${col}:`, err)
       );
+    },
+    async get(col, id) {
+      const snap = await fs.getDoc(fs.doc(db, col, id));
+      return snap.exists() ? { id: snap.id, ...snap.data() } : null;
     },
     async add(col, data) {
       const ref = await fs.addDoc(fs.collection(db, col), data);
